@@ -11,7 +11,8 @@ A WordPress/WooCommerce plugin that **auto-populates the WooCommerce cart from M
 * Supports both simple products and product variations (using SKU or direct ID)
 * Robust parsing: supports alphanumeric SKUs with dashes/underscores
 * Handles WooCommerce cart initialization timing safely
-* Full debug logging to WordPress debug log for troubleshooting and analytics
+* Optional raw `QUERY_STRING` fallback parsing (for hosts where `$_GET` is unreliable)
+* Full debug logging to WordPress debug log (can be silenced with `FBCH_VERBOSE` constant)
 * Prevents duplicate reprocessing with transient loop guard
 * Always redirects to a clean `/cart/` URL after handling
 
@@ -69,7 +70,12 @@ When this URL is visited:
   define('WP_DEBUG', true);
   define('WP_DEBUG_LOG', true);
   ```
-* Check logs in `wp-content/debug.log` for plugin activity and troubleshooting.
+* For quieter logs, set:
+
+  ```php
+  define('FBCH_VERBOSE', false);
+  ```
+* Check logs in `wp-content/debug.log` for plugin activity.
 
 ---
 
@@ -85,7 +91,7 @@ When this URL is visited:
 
 ### Q: Why does my cart sometimes show empty after redirect?
 
-A: Previous versions ran on `wp_loaded`, which could fire before WooCommerce initialized the cart. This has been fixed by running on `template_redirect` with `is_cart()` check.
+A: Previous versions ran on `wp_loaded`, which could fire before WooCommerce initialized the cart. Fixed by running on `template_redirect` with `is_cart()` check.
 
 ### Q: My SKUs aren’t numeric Facebook IDs, will it work?
 
@@ -95,9 +101,21 @@ A: Yes. This version supports alphanumeric SKUs with dashes/underscores. If no S
 
 A: Yes. Both Instagram and Facebook deep links (Meta Shops) are supported.
 
+### Q: How do I test if the plugin is active?
+
+A: Visit `/cart/?fbch=ping` while logged in as admin. You’ll see a one-time admin notice and a log line confirming the plugin is active.
+
 ---
 
 ## Changelog
+
+### 1.5.3 (2025-09-04)
+
+* Hardened against cart not being ready at `template_redirect`
+* Guarded against fatal errors when calling `add_to_cart`
+* Logging now only triggers when `?products=` exists (to reduce overhead)
+* Added optional `FBCH_VERBOSE` constant to control verbosity
+* Added `/cart/?fbch=ping` health check
 
 ### 1.5 (2025-09-04)
 
