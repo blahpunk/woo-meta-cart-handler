@@ -6,15 +6,16 @@ A WordPress/WooCommerce plugin that **auto-populates the WooCommerce cart from M
 
 ## Features
 
-* Accepts Meta/Facebook/Instagram shop links with pre-filled products
-* Parses the `products` parameter and auto-adds each product to the WooCommerce cart by SKU or ID
-* Supports both simple products and product variations (using SKU or direct ID)
-* Robust parsing: supports alphanumeric SKUs with dashes/underscores
-* Handles WooCommerce cart initialization timing safely
-* Optional raw `QUERY_STRING` fallback parsing (for hosts where `$_GET` is unreliable)
-* Full debug logging to WordPress debug log (can be silenced with `FBCH_VERBOSE` constant)
-* Prevents duplicate reprocessing with transient loop guard
-* Always redirects to a clean `/cart/` URL after handling
+* Accepts Meta/Facebook/Instagram shop links with pre-filled products.
+* Parses the `products` parameter and auto-adds each product to the WooCommerce cart by **ID or SKU**.
+* Supports both simple products and **product variations** (by numeric ID or SKU).
+* Robust parsing: tokens may include parent ID/SKU + variation ID/SKU + quantity.
+* Optional `fbch=ping` health check confirms plugin is active.
+* Handles WooCommerce cart initialization timing safely.
+* Raw `QUERY_STRING` fallback parsing for hosts where `$_GET` is unreliable.
+* Verbose debug logging to WordPress debug log (controlled by `FBCH_VERBOSE`).
+* Prevents duplicate reprocessing with transient loop guard.
+* Always redirects to a clean `/cart/` URL after handling.
 
 ---
 
@@ -25,12 +26,12 @@ A WordPress/WooCommerce plugin that **auto-populates the WooCommerce cart from M
 
 2. **Upload to your WordPress site:**
 
-   * Go to **Plugins > Add New > Upload Plugin** and select the ZIP file
-   * OR extract the contents to your `/wp-content/plugins/` directory
+   * Go to **Plugins > Add New > Upload Plugin** and select the ZIP file, or
+   * Extract the contents to your `/wp-content/plugins/` directory.
 
 3. **Activate the plugin:**
 
-   * In WordPress Admin, navigate to **Plugins** and activate **WooCommerce Meta Cart Handler**
+   * In WordPress Admin, navigate to **Plugins** and activate **WooCommerce Meta Cart Handler**.
 
 ---
 
@@ -40,16 +41,44 @@ A WordPress/WooCommerce plugin that **auto-populates the WooCommerce cart from M
 
 Meta Shop (Facebook/Instagram) checkout and ads may link users to URLs like:
 
-```
-https://yourstore.com/cart/?products=SM30RDM_60:1,CEYEPATCH_13798:2&cart_origin=meta_shops&fbclid=XYZ
+```text
+https://yourstore.com/cart/?products=123_456:2,SKU123:1
 ```
 
 When this URL is visited:
 
 * The plugin parses the `products` parameter.
-* For each item, it finds a WooCommerce product or variation by **SKU** (letters/numbers/dashes/underscores) or by numeric ID fallback.
-* Each product is added to the WooCommerce cart with the specified quantity.
+* Each token follows the format:
+
+  * `token[_variationToken][:qty]`
+  * `token` and `variationToken` may be numeric IDs or SKUs.
+  * `qty` defaults to 1 if not specified.
+* The handler resolves the correct WooCommerce product/variation.
+* The item(s) are added to the cart in the requested quantity.
 * User is redirected to a clean `/cart/` URL.
+
+### Examples
+
+* By numeric product ID:
+
+  ```
+  /cart/?products=123:1
+  ```
+* By SKU:
+
+  ```
+  /cart/?products=SKU123:2
+  ```
+* By parent + variation ID:
+
+  ```
+  /cart/?products=123_456:1
+  ```
+* By parent + variation SKU:
+
+  ```
+  /cart/?products=SKU_PARENT_SKU_VARIANT:1
+  ```
 
 ---
 
@@ -58,79 +87,74 @@ When this URL is visited:
 * WordPress 6.x+
 * WooCommerce 8.x+
 * PHP 7.4 or newer
-* Your products' **SKU** must match the Meta/Facebook Product ID (or be synced by Facebook/Instagram integration plugin)
+* Products must have IDs or SKUs mapped to Meta/Facebook (via catalog sync or manual entry).
 
 ---
 
 ## Debugging
 
-* Enable debugging in `wp-config.php`:
+Enable logging in `wp-config.php`:
 
-  ```php
-  define('WP_DEBUG', true);
-  define('WP_DEBUG_LOG', true);
-  ```
-* For quieter logs, set:
+```php
+define('WP_DEBUG', true);
+define('WP_DEBUG_LOG', true);
+define('FBCH_VERBOSE', true); // optional, adds detailed logging
+```
 
-  ```php
-  define('FBCH_VERBOSE', false);
-  ```
-* Check logs in `wp-content/debug.log` for plugin activity.
+Check logs in `wp-content/debug.log`. Example log lines:
 
----
-
-## Security
-
-* The handler only allows products present in WooCommerce and mapped by SKU/ID.
-* No sensitive data is exposed via the cart handler.
-* Transient guard prevents accidental reprocessing or redirect loops.
+```
+FBCH: processing products param -> 123_456:1
+FBCH: added -> product 123 / variation 456 qty 1
+```
 
 ---
 
 ## FAQ
 
-### Q: Why does my cart sometimes show empty after redirect?
+**Q: How do I test if the plugin is active?**
+A: Visit `/cart/?fbch=ping`. You’ll see a success notice on the cart page and a log entry confirming activity.
 
-A: Previous versions ran on `wp_loaded`, which could fire before WooCommerce initialized the cart. Fixed by running on `template_redirect` with `is_cart()` check.
+**Q: Why does my cart show empty after redirect?**
+A: Ensure caching is disabled for `/cart/`. Also confirm that the product/variation is published and purchasable.
 
-### Q: My SKUs aren’t numeric Facebook IDs, will it work?
+**Q: My SKUs aren’t numeric Facebook IDs. Will it work?**
+A: Yes. Both alphanumeric SKUs and numeric IDs are supported.
 
-A: Yes. This version supports alphanumeric SKUs with dashes/underscores. If no SKU match is found, numeric IDs are attempted as direct product/variation IDs.
-
-### Q: Does this work with Instagram links?
-
-A: Yes. Both Instagram and Facebook deep links (Meta Shops) are supported.
-
-### Q: How do I test if the plugin is active?
-
-A: Visit `/cart/?fbch=ping` while logged in as admin. You’ll see a one-time admin notice and a log line confirming the plugin is active.
+**Q: Can I immediately retry the same link?**
+A: No, the plugin prevents duplicate reprocessing for 60 seconds. Change the quantity or wait before retesting.
 
 ---
 
 ## Changelog
 
+### 1.6.0 (2025-09-12)
+
+* Added explicit support for variation IDs and SKUs in `products=` tokens.
+* Added working `/cart/?fbch=ping` health check with notice + logging.
+* Improved debug logging for parse failures and add-to-cart results.
+
 ### 1.5.3 (2025-09-04)
 
-* Hardened against cart not being ready at `template_redirect`
-* Guarded against fatal errors when calling `add_to_cart`
-* Logging now only triggers when `?products=` exists (to reduce overhead)
-* Added optional `FBCH_VERBOSE` constant to control verbosity
-* Added `/cart/?fbch=ping` health check
+* Hardened against cart not being ready at `template_redirect`.
+* Guarded against fatal errors when calling `add_to_cart`.
+* Logging now only triggers when `?products=` exists.
+* Added optional `FBCH_VERBOSE` constant.
+* Added `/cart/?fbch=ping` health check.
 
 ### 1.5 (2025-09-04)
 
-* Changed hook from `wp_loaded` to `template_redirect` for reliable WooCommerce cart/session availability
-* Broadened SKU support: alphanumeric with dashes/underscores
-* Added raw `QUERY_STRING` fallback parsing for edge cases where `$_GET` is empty
-* Added transient guard to prevent reprocessing/redirect loops
-* Improved logging (request URI, raw query string, parsed items)
-* Added support for numeric IDs if no SKU match is found
-* Ensured clean cart redirect after handling
+* Changed hook from `wp_loaded` to `template_redirect` for reliable WooCommerce cart/session availability.
+* Broadened SKU support: alphanumeric with dashes/underscores.
+* Added raw `QUERY_STRING` fallback parsing.
+* Added transient guard to prevent reprocessing/redirect loops.
+* Improved logging (request URI, raw query string, parsed items).
+* Added support for numeric IDs if no SKU match is found.
+* Ensured clean cart redirect after handling.
 
 ### 1.4
 
-* Initial working version with `wp_loaded` hook and numeric-only SKU support
-* Basic logging of cart URLs and product parameter
+* Initial version with `wp_loaded` hook and numeric-only SKU support.
 
 ---
 
@@ -142,8 +166,8 @@ MIT License
 
 ## Contributing
 
-PRs and issues welcome.
-See [github.com/blahpunk/woo-meta-cart-handler](https://github.com/blahpunk/woo-meta-cart-handler) for source.
+Pull requests and issues welcome.
+[github.com/blahpunk/woo-meta-cart-handler](https://github.com/blahpunk/woo-meta-cart-handler)
 
 ---
 

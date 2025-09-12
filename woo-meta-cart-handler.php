@@ -1,181 +1,182 @@
 <?php
 /*
-Plugin Name: WooCommerce Meta Cart Handler (stable)
-Description: Auto-adds products to the WooCommerce cart from Meta (Facebook/Instagram) deep links. Hardened against early cart init, fatal errors, and noisy logging.
-Version: 1.5.3
+Plugin Name: WooCommerce Meta Cart Handler
+Description: Auto-adds products to the WooCommerce cart from Meta/Facebook deep links using a `products=` query param. Supports IDs or SKUs, optional variation IDs/SKUs, quantities, and multiple items.
+Version: 1.6.0
 Author: BlahPunk
 */
 
-if (!defined('ABSPATH')) exit;
+if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-// Optional: set true to log details when processing ?products=
-if (!defined('FBCH_VERBOSE')) {
-    define('FBCH_VERBOSE', false);
+// Optional verbose logging. Enable in wp-config.php with: define('FBCH_VERBOSE', true);
+if ( ! defined( 'FBCH_VERBOSE' ) ) {
+    define( 'FBCH_VERBOSE', false );
 }
 
-/**
- * Process deep links on the cart page after WooCommerce/cart are initialized.
- * Runs only on front-end GET requests to the cart.
- */
 add_action('template_redirect', function () {
-    // Front-end only
-    if (is_admin() || wp_doing_ajax() || (defined('REST_REQUEST') && REST_REQUEST)) {
+    if ( ! function_exists( 'WC' ) ) { return; }
+
+    // Ensure we're on the WooCommerce cart page (avoid interfering elsewhere)
+    if ( ! is_cart() ) {
         return;
     }
 
-    // Only act on GET requests
-    if (isset($_SERVER['REQUEST_METHOD']) && strtoupper($_SERVER['REQUEST_METHOD']) !== 'GET') {
-        return;
-    }
-
-    // Only act on the cart page
-    if (!function_exists('is_cart') || !is_cart()) {
-        return;
-    }
-
-    // WooCommerce must be ready and cart object available
-    if (!function_exists('WC') || !WC() || !isset(WC()->cart) || !WC()->cart || !is_object(WC()->cart)) {
-        if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
-            error_log('FBCH: WC cart not ready at template_redirect; aborting safely.');
+    // Simple health check for README: /cart/?fbch=ping
+    if ( isset($_GET['fbch']) && $_GET['fbch'] === 'ping' ) {
+        if ( function_exists('wc_add_notice') ) {
+            wc_add_notice( __('Meta Cart Handler active.'), 'success' );
         }
-        return;
+        if ( FBCH_VERBOSE ) {
+            error_log('FBCH: ping received - handler active on cart page');
+        }
+        wp_safe_redirect( wc_get_cart_url() );
+        exit;
     }
 
-    // Read products param from $_GET or raw query string
+    // Normalize and retrieve products param from superglobals or parsed query string
     $products_param = '';
-    if (isset($_GET['products'])) {
+    if ( isset($_GET['products']) ) {
         $products_param = (string) $_GET['products'];
-    } elseif (!empty($_SERVER['QUERY_STRING'])) {
+    } elseif ( ! empty($_SERVER['QUERY_STRING']) ) {
         parse_str($_SERVER['QUERY_STRING'], $qs);
-        if (isset($qs['products'])) {
+        if ( isset($qs['products']) ) {
             $products_param = (string) $qs['products'];
         }
     }
 
-    if ($products_param === '' || $products_param === null) {
-        return; // no work to do
+    if ( $products_param === '' || $products_param === null ) {
+        return; // nothing to do
     }
 
-    // Prevent reprocessing loops if edge/cache replays the same URL
-    $hash = md5($products_param);
-    $flag_key = 'fb_cart_handled_' . $hash;
-    if (get_transient($flag_key)) {
-        return;
+    // Prevent re-processing loops (e.g., CDN replays same URL)
+    $flag_key = 'fb_cart_handled_' . md5($products_param);
+    if ( get_transient($flag_key) ) {
+        if ( FBCH_VERBOSE ) {
+            error_log('FBCH: skip (recently handled) -> ' . $products_param);
+        }
+        wp_safe_redirect( wc_get_cart_url() );
+        exit;
     }
 
-    // Decode and split: <SKU-or-ID>_<VARIANTID>:<QTY>, comma-separated
-    $decoded = trim(urldecode($products_param));
-    $items   = array_filter(array_map('trim', explode(',', $decoded)));
-
-    if (FBCH_VERBOSE && defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
-        error_log('FBCH: processing products param -> ' . $decoded);
+    if ( FBCH_VERBOSE ) {
+        error_log('FBCH: processing products param -> ' . $products_param);
     }
 
-    // Accept SKUs with letters/numbers/dash/underscore; variant & qty must be numeric
-    $pattern = '/^([A-Za-z0-9\-_]+)_(\d+):(\d+)$/';
+    $items = array_filter(array_map('trim', explode(',', $products_param)));
+    if ( empty($items) ) {
+        if ( FBCH_VERBOSE ) {
+            error_log('FBCH: parse fail (no items) for -> ' . $products_param);
+        }
+        set_transient($flag_key, 1, 60);
+        wp_safe_redirect( wc_get_cart_url() );
+        exit;
+    }
 
-    foreach ($items as $item) {
-        if (!preg_match($pattern, $item, $m)) {
-            if (FBCH_VERBOSE && defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
-                error_log('FBCH: parse fail -> ' . $item);
-            }
+    foreach ( $items as $raw ) {
+        // Pattern: token[_variationToken][:qty]
+        // token and variationToken can be numeric IDs or SKUs
+        // qty defaults to 1
+        $m = [];
+        if ( ! preg_match('/^\s*([^:,]+?)(?:_([^:,]+))?(?::(\d+))?\s*$/', $raw, $m) ) {
+            if ( FBCH_VERBOSE ) error_log('FBCH: parse fail item -> ' . $raw);
             continue;
         }
+        $token         = isset($m[1]) ? trim($m[1]) : '';
+        $variation_tok = isset($m[2]) ? trim($m[2]) : '';
+        $qty           = isset($m[3]) && (int)$m[3] > 0 ? (int)$m[3] : 1;
 
-        $sku_or_id  = $m[1];
-        $variant_id = (int) $m[2]; // preserved for future mapping
-        $qty        = max(1, (int) $m[3]);
+        $product_id = 0;
+        $variation_id = 0;
+        $variation_data = [];
 
-        $product_id   = null;
-        $variation_id = null;
+        // Helper: add a resolved product/variation to cart
+        $add_resolved = function($product_id, $qty, $variation_id = 0, $variation_data = []) {
+            if ( $variation_id ) {
+                return WC()->cart->add_to_cart($product_id, $qty, $variation_id, $variation_data);
+            }
+            return WC()->cart->add_to_cart($product_id, $qty);
+        };
 
-        // 1) Try Woo's SKU lookup (fast/cached) when token isn't purely numeric
-        if (!ctype_digit($sku_or_id) && function_exists('wc_get_product_id_by_sku')) {
-            $maybe = wc_get_product_id_by_sku($sku_or_id);
-            if ($maybe) {
-                if ('product_variation' === get_post_type($maybe)) {
-                    $variation_id = (int) $maybe;
-                    $parent = wp_get_post_parent_id($variation_id);
-                    if ($parent) $product_id = (int) $parent;
-                } else {
-                    $product_id = (int) $maybe;
-                }
+        // Attempt resolution path 1: explicit numeric variation ID
+        if ( $variation_tok !== '' && ctype_digit($variation_tok) ) {
+            $maybe_variation = wc_get_product( (int)$variation_tok );
+            if ( $maybe_variation && $maybe_variation->is_type('variation') ) {
+                $variation_id = (int)$variation_tok;
+                $product_id   = $maybe_variation->get_parent_id();
+                $variation_data = $maybe_variation->get_variation_attributes();
             }
         }
 
-        // 2) Fallback exact meta query by _sku
-        if (!$product_id && !$variation_id) {
-            $posts = get_posts([
-                'post_type'      => ['product', 'product_variation'],
-                'posts_per_page' => 1,
-                'fields'         => 'ids',
-                'meta_query'     => [
-                    [
-                        'key'     => '_sku',
-                        'value'   => $sku_or_id,
-                        'compare' => '='
-                    ]
-                ]
-            ]);
-            if (!empty($posts)) {
-                $found_id = (int) $posts[0];
-                if ('product_variation' === get_post_type($found_id)) {
-                    $variation_id = $found_id;
-                    $parent = wp_get_post_parent_id($found_id);
-                    if ($parent) $product_id = (int) $parent;
-                } else {
-                    $product_id = $found_id;
-                }
-            }
-        }
-
-        // 3) Final fallback: if token is numeric, treat as direct product/variation ID
-        if (!$product_id && !$variation_id && ctype_digit($sku_or_id)) {
-            $maybe_id = (int) $sku_or_id;
-            if ($maybe_id > 0 && get_post_status($maybe_id)) {
-                if ('product_variation' === get_post_type($maybe_id)) {
-                    $variation_id = $maybe_id;
-                    $parent = wp_get_post_parent_id($maybe_id);
-                    if ($parent) $product_id = (int) $parent;
-                } else {
-                    $product_id = $maybe_id;
-                }
-            }
-        }
-
-        if (!$product_id && !$variation_id) {
-            if (FBCH_VERBOSE && defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
-                error_log('FBCH: not found -> ' . $sku_or_id);
-            }
-            continue;
-        }
-
-        // Double-check cart object and method availability to avoid fatals
-        if (!isset(WC()->cart) || !WC()->cart || !is_object(WC()->cart) || !is_callable([WC()->cart, 'add_to_cart'])) {
-            if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
-                error_log('FBCH: cart object/method unavailable; aborting add_to_cart.');
-            }
-            continue;
-        }
-
-        // Add to cart (no attribute mapping by variant_id in this version)
-        $added = $variation_id
-            ? WC()->cart->add_to_cart($product_id, $qty, $variation_id)
-            : WC()->cart->add_to_cart($product_id, $qty);
-
-        if (FBCH_VERBOSE && defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
-            if ($added) {
-                error_log('FBCH: added -> product ' . $product_id . ($variation_id ? " / variation {$variation_id}" : '') . " qty {$qty}");
+        // If not yet resolved, resolve $token (parent or direct product/variation by ID or SKU)
+        if ( ! $product_id ) {
+            if ( ctype_digit($token) ) {
+                $pid = (int)$token;
             } else {
-                error_log('FBCH: add_to_cart failed -> product ' . $product_id . ($variation_id ? " / variation {$variation_id}" : '') . " qty {$qty}");
+                $pid = wc_get_product_id_by_sku($token);
+            }
+            if ( $pid ) {
+                $prod = wc_get_product($pid);
+                if ( $prod ) {
+                    if ( $prod->is_type('variation') ) {
+                        $variation_id  = $pid;
+                        $product_id    = $prod->get_parent_id();
+                        $variation_data = $prod->get_variation_attributes();
+                    } else {
+                        $product_id = $pid;
+                    }
+                }
+            }
+        }
+
+        // If variation token exists but not numeric, try to resolve as variation SKU under parent or globally
+        if ( $variation_tok && ! $variation_id ) {
+            $vid = ctype_digit($variation_tok) ? (int)$variation_tok : wc_get_product_id_by_sku($variation_tok);
+            if ( $vid ) {
+                $vprod = wc_get_product($vid);
+                if ( $vprod && $vprod->is_type('variation') ) {
+                    $variation_id  = $vid;
+                    $product_id    = $vprod->get_parent_id();
+                    $variation_data = $vprod->get_variation_attributes();
+                }
+            }
+        }
+
+        if ( ! $product_id ) {
+            if ( FBCH_VERBOSE ) error_log('FBCH: resolution failed -> ' . $raw);
+            continue;
+        }
+
+        // Ensure purchasable
+        $product_obj = wc_get_product( $variation_id ? $variation_id : $product_id );
+        if ( ! $product_obj || ! $product_obj->is_purchasable() ) {
+            if ( FBCH_VERBOSE ) error_log('FBCH: not purchasable -> ' . $raw);
+            continue;
+        }
+
+        // Add to cart
+        $added = $add_resolved($product_id, $qty, $variation_id, $variation_data);
+
+        if ( FBCH_VERBOSE ) {
+            if ( $added ) {
+                error_log(sprintf('FBCH: added -> product %d%s qty %d',
+                    $product_id,
+                    $variation_id ? (' / variation ' . $variation_id) : '',
+                    $qty
+                ));
+            } else {
+                error_log(sprintf('FBCH: add_to_cart failed -> product %d%s qty %d',
+                    $product_id,
+                    $variation_id ? (' / variation ' . $variation_id) : '',
+                    $qty
+                ));
             }
         }
     }
 
-    // Mark handled for this exact param for 60 seconds (prevents repeat processing/redirects)
+    // mark handled for 60s to avoid reprocessing if URL replayed
     set_transient($flag_key, 1, 60);
 
-    // Redirect to clean cart URL (strip query string) whether or not items were added
-    wp_safe_redirect(wc_get_cart_url());
+    // Always redirect to a clean cart URL
+    wp_safe_redirect( wc_get_cart_url() );
     exit;
 });
